@@ -2,6 +2,8 @@ extern crate pairing;
 extern crate rand;
 extern crate blake2;
 extern crate byteorder;
+extern crate crossbeam;
+extern crate num_cpus;
 
 use byteorder::{ReadBytesExt, BigEndian,ByteOrder, NativeEndian};
 use rand::{SeedableRng, Rng, Rand,XorShiftRng};
@@ -62,24 +64,55 @@ pub fn hash_to_g2(msg: &[u8])-> G2
     ChaChaRng::from_seed(&seed).gen()
 }
 
-fn aggregate_pubkey(pks:&Vec<G1Affine>) -> G1Affine{
-    let t = hash_pks(&pks);
+fn aggregate_pubkey(pks:& Vec<G1Affine>) -> G1Affine{
+    let mut t = hash_pks(&pks);
+    assert_eq!(t.len(),pks.len());
+    let mut pk_t = vec![G1::zero(); t.len()];
     let mut pubkey_sum = G1::zero();
+
+    let mut pks_mut = vec![G1Affine::zero(); t.len()];
+    for (pk_mut,pk) in pks_mut.iter_mut()
+        .zip(pks.iter()){
+        *pk_mut = pk.clone();
+    }
+    //multi threads
+    /*
     for (ti,pki) in t.iter().zip(pks.iter()){
         pubkey_sum.add_assign(&pki.mul(*ti));
     }
+    */
+    let chunk_size= t.len() / num_cpus::get();
 
+    crossbeam::scope(|scope| {
+        for ((tis, pkis),pki_tis) in t.chunks_mut(chunk_size)
+            .zip(pks_mut.chunks_mut(chunk_size))
+            .zip(pk_t.chunks_mut(chunk_size))
+            {
+                scope.spawn(move || {
+                   for ((t_i, pk_i), pki_ti) in tis.iter()
+                       .zip(pkis.iter())
+                       .zip(pki_tis.iter_mut()){
+                       *pki_ti = pk_i.mul(*t_i);
+                   }
+
+                });
+            }
+    });
+    for i in 0.. t.len(){
+        pubkey_sum.add_assign(&pk_t[i]);
+    }
     pubkey_sum.into_affine()
 }
 
 fn aggregate_signature(sigs:&Vec<G2Affine>, pks:&Vec<G1Affine>) -> G2Affine{
     let t = hash_pks(&pks);
-    let mut pubkey_sum = G2::zero();
+    let mut sig_sum = G2::zero();
+    //multi threads
     for (ti,sigi) in t.iter().zip(sigs.iter()){
-        pubkey_sum.add_assign(&sigi.mul(*ti));
+        sig_sum.add_assign(&sigi.mul(*ti));
     }
 
-    pubkey_sum.into_affine()
+    sig_sum.into_affine()
 }
 
 fn single_sig()
