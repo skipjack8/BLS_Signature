@@ -2,12 +2,10 @@ extern crate pairing;
 extern crate rand;
 extern crate blake2;
 extern crate byteorder;
-//extern crate generic_array;
 
 use byteorder::{ReadBytesExt, BigEndian,ByteOrder, NativeEndian};
 use rand::{SeedableRng, Rng, Rand,XorShiftRng};
 use rand::chacha::ChaChaRng;
-//use generic_array::GenericArray;
 use pairing::bls12_381::*;
 use pairing::*;
 use blake2::{Blake2b, Digest, Blake2s};
@@ -23,158 +21,6 @@ pub fn read_fr(from: &[u8]) -> FrRepr {
 
     f
 }
-
-//Hash to Fq
-fn hash_to_Fq(mut hasher:  Blake2b) -> Fq {
-    let mut repr: [u64; 6] = [0; 6];
-    let mut count : u32 = 0;
-    let mut count_u8 : [u8; 4] = [0; 4];
-
-    // hash in counter mode: append to the nonce a counter
-    loop {
-        // increment the counter
-        count += 1;
-        NativeEndian::write_u32(&mut count_u8, count);
-        hasher.input(&count_u8);
-        // truncate and shave the hash result
-        BigEndian::read_u64_into(&hasher.result().as_slice()[.. 48], &mut repr);
-        let mut e = FqRepr(repr);
-        e.shr(3);
-        let q = Fq::from_repr(e);
-        match q {
-            Ok(n) => return n,
-            _ => (),
-        }
-    }
-}
-//Hash to Fq2
-fn hash_to_Fq2(mut hasher: Blake2b) -> Fq2{
-    let mut hasher_c0 = hasher.clone();
-    let mut hasher_c1 = hasher.clone();
-    hasher_c0.input("_c0".as_bytes());
-    hasher_c1.input("_c1".as_bytes());
-
-    Fq2 { c0: hash_to_Fq(hasher_c0), c1: hash_to_Fq(hasher_c1) }
-}
-fn parity(x: Fq2) -> bool{
-    ((x.c0).0).0[0] % 1 == 1
-}
-fn sw_encode(t: Fq2) -> G2Affine {
-   const B_COEFF_Fq:Fq = Fq::from_repr(FqRepr([
-        0xaa270000000cfff3,
-        0x53cc0032fc34000a,
-        0x478fe97a6b0a807f,
-        0xb1d37ebee6ba24d7,
-        0x8ec9733bbf78ab2f,
-        0x9d645513d83de7e,
-    ])).unwrap();
-
-    const B_COEFF_Fq2:Fq2 =  Fq2 {
-        c0: B_COEFF_Fq,
-        c1: B_COEFF_Fq,
-    };
-
-    const SWENC_CONST0_Fq:Fq = Fq::from_repr(FqRepr([
-        0x1dec6c36f3181f22,
-        0xb4b9bb641054b457,
-        0x25695a2be9415286,
-        0x982b6cbf66c749bc,
-        0x7d58e1ae1feb7873,
-        0x62c96300937c0b9,
-    ])).unwrap();
-    const SWENC_CONST1_Fq:Fq = Fq::from_repr(FqRepr([
-        0x30f1361b798a64e8,
-        0xf3b8ddab7ece5a2a,
-        0x16a8ca3ac61577f7,
-        0xc26a2ff874fd029b,
-        0x3636b76660701c6e,
-        0x51ba4ab241b6160,
-    ])).unwrap();
-
-    const SWENC_CONST0_Fq2:Fq2 = Fq2 {
-        c0: SWENC_CONST0_Fq,
-        c1: Fq::zero()
-    };
-
-    const SWENC_CONST1_Fq2:Fq2 = Fq2 {
-        c0: SWENC_CONST1_Fq,
-        c1: Fq::zero()
-    };
-
-    const ZERO:G2Affine = G2Affine::zero();
-    // handle the case t == 0
-    if t.is_zero() { return ZERO};
-
-    // w = (t^2 + b + 1)^(-1) * sqrt(-3) * t
-    let mut w = t;
-    w.square();
-    w.add_assign(&B_COEFF_Fq2);
-    w.add_assign(&Fq2::one());
-    // handle the case t^2 + b + 1 == 0
-    if w.is_zero() { return ZERO};
-    w = w.inverse().unwrap();
-    w.mul_assign(&SWENC_CONST0_Fq2);
-    w.mul_assign(&t);
-
-    // We choose the corresponding y-coordinate with the same parity as t.
-    let parity = t.parity();
-
-    // x1 = - wt  + (sqrt(-3) - 1) / 2
-    let mut x1 = w;
-    x1.mul_assign(&t);
-    x1.negate();
-    x1.add_assign(&SWENC_CONST1_Fq2);
-    if let Some(p) = G2Affine::get_point_from_x(x1, parity) {
-        return p
-    }
-
-    // x2 = -1 -x1
-    let mut x2 = x1;
-    x2.negate();
-    x2.sub_assign(&Fq2::one());
-    if let Some(p) = G2Affine::get_point_from_x(x2, parity) {
-        return p
-    }
-
-    // x3 = 1/w^2 + 1
-    let mut x3 = w;
-    x3.square();
-    x3 = x3.inverse().unwrap();
-    x3.add_assign(&Fq2::one());
-    G2Affine::get_point_from_x(x3, parity).unwrap()
-
-    }
-
-
-
-/*
-fn msg_hash(msg: &[u8]) -> G2Affine {
-    // the key must be of at least 128 bits.
-    assert!(msg.len() >= 16);
-
-    // The construction of Foque et al. requires us to construct two
-    // "random oracles" in the field, encode their image with `sw_encode`,
-    // and finally add them.
-    // We construct them appending to the message the string
-    // $name_$oracle
-    // For instance, the first oracle in group G1 appends: "G1_0"
-    let mut hasher = Blake2b::new();
-    hasher.input(msg);
-    hasher.input("G1_0".as_bytes());
-    let t1 = hash_to_Fq2(hasher);
-    let t1 = Self::sw_encode(t1);
-
-    let mut hasher = Blake2b::new();
-    hasher.input(msg);
-    hasher.input("G1_1".as_bytes());
-    let t2 = hash_to_Fq2(hasher);
-    let t2 = Self::sw_encode(t2);
-
-    let mut res = t2.into_projective();
-    res.add_assign_mixed(&t1);
-    res.into_affine().scale_by_cofactor().into_affine()
-
-}*/
 
 //hash n pks to n elements of Fr
 pub fn hash_pks(pks:&Vec<G1Affine>)-> Vec<FrRepr>{
@@ -393,6 +239,7 @@ fn secure_aggregate_sig(){
 
     //verify one by one
     g1.negate();
+    /********************Time start here *************/
     let start = Instant::now();
     for i in 0..1{
         assert_eq!(Bls12::final_exponentiation(
