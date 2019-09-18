@@ -105,13 +105,41 @@ fn aggregate_pubkey(pks:& Vec<G1Affine>) -> G1Affine{
 }
 
 fn aggregate_signature(sigs:&Vec<G2Affine>, pks:&Vec<G1Affine>) -> G2Affine{
-    let t = hash_pks(&pks);
+    assert_eq!(sigs.len(),pks.len());
+    let mut t = hash_pks(&pks);
+    let mut sig_t = vec![G2::zero(); t.len()];
     let mut sig_sum = G2::zero();
     //multi threads
+    /*
     for (ti,sigi) in t.iter().zip(sigs.iter()){
         sig_sum.add_assign(&sigi.mul(*ti));
     }
+    */
+    let mut sigs_mut = vec![G2Affine::zero(); t.len()];
+    for (sig_mut,sig) in sigs_mut.iter_mut()
+        .zip(sigs.iter()){
+        *sig_mut = sig.clone();
+    }
+    let chunk_size= t.len() / num_cpus::get();
 
+    crossbeam::scope(|scope| {
+        for ((tis, sigis),sigi_tis) in t.chunks_mut(chunk_size)
+            .zip(sigs_mut.chunks_mut(chunk_size))
+            .zip(sig_t.chunks_mut(chunk_size))
+            {
+                scope.spawn(move || {
+                    for ((t_i, sig_i), sigi_ti) in tis.iter()
+                        .zip(sigis.iter())
+                        .zip(sigi_tis.iter_mut()){
+                        *sigi_ti = sig_i.mul(*t_i);
+                    }
+
+                });
+            }
+    });
+    for i in 0.. t.len(){
+        sig_sum.add_assign(&sig_t[i]);
+    }
     sig_sum.into_affine()
 }
 
@@ -240,7 +268,7 @@ fn aggregate_sig(){
 }
 
 fn secure_aggregate_sig(){
-    const MSG_LEN:usize = 1024000;
+    const MSG_LEN:usize = 1048576;
     let one = Fq12::one();
     let mut msg= [0u8;MSG_LEN];
     for i in 0..MSG_LEN{
