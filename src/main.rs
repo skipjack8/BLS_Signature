@@ -1,19 +1,26 @@
 extern crate pairing;
 extern crate rand;
-extern crate blake2;
+extern crate blake2_rfc;
 extern crate byteorder;
 extern crate crossbeam;
 extern crate num_cpus;
 
-use byteorder::{ReadBytesExt, BigEndian,ByteOrder, NativeEndian};
+use byteorder::{ReadBytesExt, BigEndian};//,ByteOrder, NativeEndian};
 use rand::{SeedableRng, Rng, Rand,XorShiftRng};
 use rand::chacha::ChaChaRng;
-use pairing::bls12_381::*;
-use pairing::*;
-use blake2::{Blake2b, Digest, Blake2s};
+//use pairing::bls12_381::*;
+//use pairing::*;
+
+use pairing::{
+    bls12_381::{Bls12, Fr, FrRepr, G1, G1Affine, G1Compressed, G2, G2Affine, Fq12 },
+    BitIterator, Field, PrimeField, PrimeFieldRepr, Engine,EncodedPoint,CurveAffine, CurveProjective,
+};
+
+//use blake2::{Blake2b, Digest, Blake2s};
+use blake2_rfc::blake2s::Blake2s;
+use blake2_rfc::blake2b::Blake2b;
 use std::fmt;
 use std::time::{Duration, Instant};
-
 
 pub fn read_fr(from: &[u8]) -> FrRepr {
     assert_eq!(from.len(), 32);
@@ -27,20 +34,19 @@ pub fn read_fr(from: &[u8]) -> FrRepr {
 //hash n pks to n elements of Fr
 pub fn hash_pks(pks:&Vec<G1Affine>)-> Vec<FrRepr>{
     let mut t = Vec::new();
-    let h = {
-        let mut h = Blake2s::default();
-        for pk in pks.iter() {
-            h.input(G1Compressed::from_affine(*pk).as_ref());
-        }
-        h.result()
-    };
+    let mut h = Blake2s::new(32);
+    for pk in pks.iter() {
+        h.update(G1Compressed::from_affine(*pk).as_ref());
+    }
+    //let mut hh = h.finalize().as_bytes();
     let mut pk_hash_preimage = [0u8;36];
-    (&mut pk_hash_preimage[4..36]).copy_from_slice(&(&*h)[..]);
+    (&mut pk_hash_preimage[4..36]).copy_from_slice(h.finalize_inplace());
     for i in 0..27{
         pk_hash_preimage[3] = i;
-        let mut h1 = Blake2s::default();
-        h1.input(&pk_hash_preimage);
-        let f = read_fr(&h1.result());
+        let mut h1 = Blake2s::new(32);
+        h1.update(&pk_hash_preimage);
+        //let h1 = h1.finalize().as_bytes();
+        let f = read_fr(h1.finalize_inplace());
         t.push(f);
     }
     return t;
@@ -49,13 +55,9 @@ pub fn hash_pks(pks:&Vec<G1Affine>)-> Vec<FrRepr>{
 //hash msg to a point in G2
 pub fn hash_to_g2(msg: &[u8])-> G2
 {
-    let h = {
-        let mut h = Blake2b::default();
-        h.input(msg);
-        h.result()
-    };
-    //println!("{:?}",h);
-    let mut h = h.as_ref();
+    let mut h = Blake2b::new(64);
+    h.update(msg);
+    let mut h = h.finalize_inplace();
 
     let mut seed = Vec::with_capacity(8);
     for _ in 0..8 {
@@ -121,7 +123,6 @@ fn aggregate_signature(sigs:&Vec<G2Affine>, pks:&Vec<G1Affine>) -> G2Affine{
         *sig_mut = sig.clone();
     }
     let chunk_size= t.len() / num_cpus::get();
-
     crossbeam::scope(|scope| {
         for ((tis, sigis),sigi_tis) in t.chunks_mut(chunk_size)
             .zip(sigs_mut.chunks_mut(chunk_size))
@@ -297,7 +298,6 @@ fn secure_aggregate_sig(){
         aux_verify_coeffs.push(rand_coeffs);
     }
 
-
     //verify one by one
     g1.negate();
     /********************Time start here *************/
@@ -335,5 +335,5 @@ fn main()
 {
     //single_sig();
     //aggregate_sig();
-    secure_aggregate_sig()
+    secure_aggregate_sig();
 }
